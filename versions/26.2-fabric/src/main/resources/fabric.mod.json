@@ -1,0 +1,30 @@
+{
+    "schemaVersion": 1,
+    "id": "kotlin-hot-reload",
+    "version": "${version}",
+    "name": "Kotlin Hot Reload",
+    "description": "Embedded Kotlin compiler + live reload engine. Build, test, and modify Kotlin code without restarting the game.",
+    "authors": [
+        "Zephy"
+    ],
+    "contact": {
+        "homepage": "https://github.com/Zephy/KotlinHotReload",
+        "sources": "https://github.com/Zephy/KotlinHotReload",
+        "issues": "https://github.com/Zephy/KotlinHotReload/issues"
+    },
+    "license": "MIT",
+    "icon": "assets/kotlin-hot-reload/icon.png",
+    "environment": "*",
+    "entrypoints": {
+        "preLaunch": [
+            "org.zephy.kotlinhotreload.MixinPreLaunchEntrypoint"
+        ],
+        "main": [
+            "org.zephy.kotlinhotreload.FabricEntrypoint"
+        ]
+    },
+    "depends": {
+        "fabricloader": ">=0.19.0",
+        "fabric-language-kotlin": ">=1.13.0"
+    }
+}

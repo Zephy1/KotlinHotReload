@@ -1,0 +1,79 @@
+[versions]
+kotlin = "2.4.10"
+asm = "9.10.1"
+maven-resolver = "2.0.21"
+maven-resolver-transport-http = "1.9.27"
+maven-resolver-provider = "4.0.0-rc-6"
+maven-model-builder = "4.0.0-rc-6"
+jetbrains-annotations = "26.1.0"
+plexus-interpolation = "1.29"
+plexus-xml = "4.1.1"
+
+[libraries]
+asm = { module = "org.ow2.asm:asm", version.ref = "asm" }
+
+jetbrains-annotations = { module = "org.jetbrains:annotations", version.ref = "jetbrains-annotations" }
+kotlin-compiler-embeddable = { module = "org.jetbrains.kotlin:kotlin-compiler-embeddable", version.ref = "kotlin" }
+kotlin-scripting-compiler-embeddable = { module = "org.jetbrains.kotlin:kotlin-scripting-compiler-embeddable", version.ref = "kotlin" }
+kotlin-scripting-compiler-impl-embeddable = { module = "org.jetbrains.kotlin:kotlin-scripting-compiler-impl-embeddable", version.ref = "kotlin" }
+kotlin-scripting-common = { module = "org.jetbrains.kotlin:kotlin-scripting-common", version.ref = "kotlin" }
+kotlin-scripting-jvm = { module = "org.jetbrains.kotlin:kotlin-scripting-jvm", version.ref = "kotlin" }
+kotlin-script-runtime = { module = "org.jetbrains.kotlin:kotlin-script-runtime", version.ref = "kotlin" }
+
+maven-resolver-api = { module = "org.apache.maven.resolver:maven-resolver-api", version.ref = "maven-resolver" }
+maven-resolver-spi = { module = "org.apache.maven.resolver:maven-resolver-spi", version.ref = "maven-resolver" }
+maven-resolver-util = { module = "org.apache.maven.resolver:maven-resolver-util", version.ref = "maven-resolver" }
+maven-resolver-impl = { module = "org.apache.maven.resolver:maven-resolver-impl", version.ref = "maven-resolver" }
+maven-resolver-connector-basic = { module = "org.apache.maven.resolver:maven-resolver-connector-basic", version.ref = "maven-resolver" }
+maven-resolver-transport-http = { module = "org.apache.maven.resolver:maven-resolver-transport-http", version.ref = "maven-resolver-transport-http" }
+maven-resolver-transport-file = { module = "org.apache.maven.resolver:maven-resolver-transport-file", version.ref = "maven-resolver" }
+maven-resolver-supplier-mvn4 = { module = "org.apache.maven.resolver:maven-resolver-supplier-mvn4", version.ref = "maven-resolver" }
+maven-resolver-named-locks = { module = "org.apache.maven.resolver:maven-resolver-named-locks", version.ref = "maven-resolver" }
+maven-resolver-transport-apache = { module = "org.apache.maven.resolver:maven-resolver-transport-apache", version.ref = "maven-resolver" }
+
+maven-resolver-provider = { module = "org.apache.maven:maven-resolver-provider", version.ref = "maven-resolver-provider" }
+maven-builder-support = { module = "org.apache.maven:maven-builder-support", version.ref = "maven-resolver-provider" }
+maven-artifact = { module = "org.apache.maven:maven-artifact", version.ref = "maven-resolver-provider" }
+maven-model = { module = "org.apache.maven:maven-model", version.ref = "maven-resolver-provider" }
+
+maven-model-builder = { module = "org.apache.maven:maven-model-builder", version.ref = "maven-model-builder" }
+
+plexus-interpolation = { module = "org.codehaus.plexus:plexus-interpolation", version.ref = "plexus-interpolation" }
+plexus-xml = { module = "org.codehaus.plexus:plexus-xml", version.ref = "plexus-xml" }
+
+[bundles]
+kotlin-compiler = [
+    "jetbrains-annotations",
+    "kotlin-compiler-embeddable",
+    "kotlin-scripting-compiler-embeddable",
+    "kotlin-scripting-compiler-impl-embeddable",
+    "kotlin-scripting-common",
+    "kotlin-scripting-jvm",
+    "kotlin-script-runtime",
+]
+
+maven-resolver = [
+    "maven-resolver-api",
+    "maven-resolver-spi",
+    "maven-resolver-util",
+    "maven-resolver-impl",
+    "maven-resolver-connector-basic",
+    "maven-resolver-transport-http",
+    "maven-resolver-transport-apache",
+    "maven-resolver-transport-file",
+    "maven-resolver-supplier-mvn4",
+    "maven-resolver-named-locks",
+
+    "maven-resolver-provider",
+    "maven-builder-support",
+    "maven-artifact",
+    "maven-model",
+
+    "maven-model-builder",
+
+    "plexus-interpolation",
+    "plexus-xml",
+]
+
+[plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
