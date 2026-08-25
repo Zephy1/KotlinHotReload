@@ -61,7 +61,8 @@ class ProjectManager(
     private val mcVersionInt: Int by lazy { ModLoaderHolder.instance.getMcVersionInt() }
     private val mcVersionString: String by lazy { ModLoaderHolder.instance.getMcVersionString() }
 
-    private val MIN_MOJMAP_MC_VERSION_INT = 11404
+    private val MIN_MOJMAP_MC_VERSION_INT = 1_14_04
+    private val MAX_MOJMAP_MC_VERSION_INT = 26_01_00
 
     private val neoForgeRuntimeIsOfficial: Boolean by lazy {
         if (ModLoaderHolder.instance.loaderType != ModLoaderType.NEOFORGE) return@lazy false
@@ -95,6 +96,9 @@ class ProjectManager(
             val message = "Minecraft $mcVersionString is older than 1.14.4, official mappings not available."
             System.err.println("${ScriptEngine.LOG_PREFIX} $message")
             return@lazy NamingResult(scheme = null, warning = message)
+        }
+        if (mcVersionInt > MAX_MOJMAP_MC_VERSION_INT) {
+            return@lazy NamingResult(scheme = null, warning = null)
         }
 
         val isFabric = ModLoaderHolder.instance.loaderType == ModLoaderType.FABRIC
