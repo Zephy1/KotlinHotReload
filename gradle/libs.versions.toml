@@ -2,6 +2,8 @@
 kotlin = "2.4.10"
 asm = "9.10.1"
 spongepowered-mixins = "0.8.7"
+tiny-remapper = "0.14.0"
+mapping-io = "0.9.1"
 maven-resolver = "2.0.21"
 maven-resolver-transport-http = "1.9.27"
 maven-resolver-provider = "4.0.0-rc-6"
@@ -16,6 +18,8 @@ slf4j = "1.7.36"
 
 [libraries]
 asm = { module = "org.ow2.asm:asm", version.ref = "asm" }
+tiny-remapper = { module = "net.fabricmc:tiny-remapper", version.ref = "tiny-remapper" }
+mapping-io = { module = "net.fabricmc:mapping-io", version.ref = "mapping-io" }
 spongepowered-mixins = { module = "org.spongepowered:mixin", version.ref = "spongepowered-mixins" }
 
 jetbrains-annotations = { module = "org.jetbrains:annotations", version.ref = "jetbrains-annotations" }

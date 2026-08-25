@@ -1,6 +1,14 @@
 package org.zephy.kotlinhotreload.internal
 
 import org.zephy.kotlinhotreload.api.Project
+import org.zephy.kotlinhotreload.internal.remap.BytecodeRemapper
+import org.zephy.kotlinhotreload.internal.remap.FabricMappingsFetcher
+import org.zephy.kotlinhotreload.internal.remap.MappingStubClasspathCache
+import org.zephy.kotlinhotreload.internal.remap.MojangMappingsFetcher
+import org.zephy.kotlinhotreload.internal.remap.ProGuardMappings
+import org.zephy.kotlinhotreload.internal.remap.TinyMappingAdapter
+import org.zephy.kotlinhotreload.internal.remap.MojmapToIntermediary
+import org.zephy.kotlinhotreload.internal.remap.inverted
 import java.io.File
 import java.util.concurrent.Callable
 import java.util.concurrent.ConcurrentHashMap
@@ -18,6 +26,14 @@ sealed class ReloadOutcome {
     data class CompileFailure(val errors: List<CompileDiagnostic>) : ReloadOutcome()
     data class ProjectError(val message: String) : ReloadOutcome()
 }
+
+private data class NamingScheme(
+    val cacheKey: String,
+    val toRuntimeNames: ProGuardMappings.Direction,
+    val runtimeToFriendly: ProGuardMappings.Direction,
+)
+
+private data class NamingResult(val scheme: NamingScheme?, val warning: String?)
 
 class ProjectManager(
     private val projectsRoot: File,
@@ -45,6 +61,7 @@ class ProjectManager(
     private val mcVersionInt: Int by lazy { ModLoaderHolder.instance.getMcVersionInt() }
     private val mcVersionString: String by lazy { ModLoaderHolder.instance.getMcVersionString() }
 
+    private val MIN_MOJMAP_MC_VERSION_INT = 11404
 
     private val neoForgeRuntimeIsOfficial: Boolean by lazy {
         if (ModLoaderHolder.instance.loaderType != ModLoaderType.NEOFORGE) return@lazy false
@@ -68,6 +85,71 @@ class ProjectManager(
     fun getPreprocessorVariables(projectName: String): Map<String, Int> {
         val scoped = projectPreprocessorVariables[projectName] ?: emptyMap()
         return globalPreprocessorVariables + scoped
+    }
+
+    private val mappingsCacheDir = File(cacheRoot, "mappings")
+    private val mappingStubs = MappingStubClasspathCache(cacheRoot)
+
+    private val namingResult: NamingResult by lazy {
+        if (mcVersionInt < MIN_MOJMAP_MC_VERSION_INT) {
+            val message = "Minecraft $mcVersionString is older than 1.14.4, official mappings not available."
+            System.err.println("${ScriptEngine.LOG_PREFIX} $message")
+            return@lazy NamingResult(scheme = null, warning = message)
+        }
+
+        val isFabric = ModLoaderHolder.instance.loaderType == ModLoaderType.FABRIC
+
+        if (neoForgeRuntimeIsOfficial) {
+            System.err.println("${ScriptEngine.LOG_PREFIX} NeoForge already uses official mapping names.")
+            return@lazy NamingResult(scheme = null, warning = null)
+        }
+
+        try {
+            val mappingFile = MojangMappingsFetcher.fetchClientMappings(mcVersionString, mappingsCacheDir)
+            val parsed = ProGuardMappings.parse(mappingFile)
+
+            val toRuntimeNames = if (isFabric) {
+                val intermediaryTiny = FabricMappingsFetcher.fetchIntermediary(mcVersionString, mappingsCacheDir)
+                MojmapToIntermediary.compose(parsed.officialToObf, intermediaryTiny)
+            } else {
+                parsed.officialToObf
+            }
+
+            val runtimeToFriendly = if (isFabric) toRuntimeNames.inverted() else parsed.obfToOfficial
+
+            val scheme = NamingScheme(
+                cacheKey = "mojmap-$mcVersionString-${ModLoaderHolder.instance.loaderType.name.lowercase()}",
+                toRuntimeNames = toRuntimeNames,
+                runtimeToFriendly = runtimeToFriendly,
+            )
+            NamingResult(scheme = scheme, warning = null)
+        } catch (e: Exception) {
+            val message = "No Mojmap available for version $mcVersionString (${e.describe()})."
+            System.err.println("${ScriptEngine.LOG_PREFIX} $message")
+            NamingResult(scheme = null, warning = message)
+        }
+    }
+
+    private val toObfMappingProvider by lazy {
+        namingResult.scheme?.let { TinyMappingAdapter.toMappingProvider(it.toRuntimeNames) }
+    }
+
+    private val obfuscatedRuntimeJars: List<File> by lazy {
+        cachedRuntimeClasspath.filter { it.extension == "jar" }
+    }
+
+    private val compileTimeClasspath: List<File> by lazy {
+        val scheme = namingResult.scheme
+        if (scheme == null) {
+            cachedRuntimeClasspath
+        } else {
+            try {
+                mappingStubs.get(scheme.cacheKey, scheme.runtimeToFriendly, cachedRuntimeClasspath)
+            } catch (e: Exception) {
+                System.err.println("${ScriptEngine.LOG_PREFIX} Failed to build mapping stub classpath (${e.describe()}).")
+                cachedRuntimeClasspath
+            }
+        }
     }
 
     private val VALID_PROJECT_NAME = Regex("^[A-Za-z0-9_-]+$")
@@ -109,6 +191,26 @@ class ProjectManager(
         )
         val projectDependencyJars = ClasspathProjectIDRegistry.resolve(metadata.projectDependencies)
         return engineOwnClasspath + compileTimeClasspath + projectDependencyJars + resolvedDependencyJars
+    }
+
+    private fun remapCompiledOutput(compiledDir: File, outputDir: File) {
+        val mapping = toObfMappingProvider
+        if (mapping == null) {
+            if (outputDir.exists()) outputDir.deleteRecursively()
+            compiledDir.copyRecursively(outputDir, overwrite = true)
+            return
+        }
+
+        namingResult.scheme?.toRuntimeNames?.let { friendlyToRuntime ->
+            BytecodeRemapper.remapMixinStringAnnotations(compiledDir, friendlyToRuntime)
+        }
+
+        BytecodeRemapper.remapDirectory(
+            inputDir = compiledDir,
+            outputDir = outputDir,
+            mapping = mapping,
+            classpathJars = obfuscatedRuntimeJars,
+        )
     }
 
     fun listProjectNames(): List<String> =
@@ -178,7 +280,9 @@ class ProjectManager(
             return ReloadOutcome.CompileFailure(compileResult.errors + extra)
         }
 
-        val newMixins = metadata.mixins.filterNot { it in MixinStaging.registeredMixins(name) }
+        val remappedDir = File(cacheRoot, "build/$projectName/remapped-gen-$nextGeneration")
+        remapCompiledOutput(compileResult.outputDir!!, remappedDir)
+
         val mappingsDiagnostics = namingResult.warning?.let { listOf(warningDiagnostic(it)) } ?: emptyList()
         val versionGatedMixinDiagnostics = if (mixinSourceFilter.excludedNames.isNotEmpty()) {
             listOf(warningDiagnostic("Skipped compiling mixin(s) not applicable to MC $mcVersionString: ${mixinSourceFilter.excludedNames.joinToString()}."))
@@ -192,12 +296,12 @@ class ProjectManager(
             listOf(errorDiagnostic(message))
         } else emptyList()
 
-        val newClassLoader = ProjectClassLoader(name, compileResult.outputDir!!, baseClassLoader).apply {
+        val newClassLoader = ProjectClassLoader(projectName, remappedDir, baseClassLoader).apply {
             generation = nextGeneration
         }
 
         val instance: Project? = try {
-            instantiateEntryPoint(newClassLoader, compileResult.outputDir, metadata)
+            instantiateEntryPoint(newClassLoader, remappedDir, metadata)
         } catch (e: Exception) {
             newClassLoader.close()
             return ReloadOutcome.ProjectError("Failed to instantiate entry point: ${e.describe()}.")
@@ -276,12 +380,13 @@ class ProjectManager(
         }
 
         val compileOutputDir = buildFile(projectName, "prelaunch")
+        val remappedDir = buildFile(projectName, "prelaunch-remapped")
         val signatureFile = buildFile(projectName, "prelaunch.sig")
         val signature = sourceSignature(metadataFile, sourceFiles, projectName)
 
-        if (outputDir.isDirectory && signatureFile.isFile && signatureFile.readText() == signature) {
+        if (remappedDir.isDirectory && signatureFile.isFile && signatureFile.readText() == signature) {
             return try {
-                MixinStaging.stage(name, outputDir, cacheRoot, metadata.mixins)
+                MixinStaging.stage(projectName, remappedDir, cacheRoot, applicableMixinNames)
             } catch (e: IllegalArgumentException) {
                 System.err.println("${ScriptEngine.LOG_PREFIX} Mixin prelaunch setup failed for project '$projectName': ${e.describe()}.")
                 emptyList()
@@ -321,19 +426,20 @@ class ProjectManager(
         )
         val compileMs = System.currentTimeMillis() - compileStart
         if (!compileResult.success) {
-            System.err.println("${ScriptEngine.LOG_PREFIX} Skipping mixin prelaunch setup for '$name' - compile failed:")
             System.err.println("${ScriptEngine.LOG_PREFIX} Skipping mixin prelaunch setup for '$projectName' - compile failed:")
             compileResult.errors.forEach { System.err.println("  $it") }
             return emptyList()
         }
 
+        val remapStart = System.currentTimeMillis()
+        remapCompiledOutput(compileResult.outputDir!!, remappedDir)
+        val remapMs = System.currentTimeMillis() - remapStart
+
         return try {
-            val staged = MixinStaging.stage(name, compileResult.outputDir!!, cacheRoot, metadata.mixins)
+            val staged = MixinStaging.stage(projectName, remappedDir, cacheRoot, applicableMixinNames)
             signatureFile.parentFile.mkdirs()
             signatureFile.writeText(signature)
-            System.err.println(
-                "${ScriptEngine.LOG_PREFIX} Mixins for '$name' staged in ${depMs + compileMs}ms (dependency resolution: ${depMs}ms, compile: ${compileMs}ms)"
-            )
+            System.err.println("${ScriptEngine.LOG_PREFIX} Mixins for '$projectName' staged in ${depMs + compileMs + remapMs}ms (dependency resolution: ${depMs}ms, compile: ${compileMs}ms, remap: ${remapMs}ms)")
             staged
         } catch (e: IllegalArgumentException) {
             System.err.println("${ScriptEngine.LOG_PREFIX} Mixin prelaunch setup failed for project '$projectName': ${e.describe()}.")

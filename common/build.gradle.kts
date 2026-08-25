@@ -15,6 +15,8 @@ repositories {
 
 dependencies {
     compileOnly(libs.asm)
+    compileOnly(libs.tiny.remapper)
+    compileOnly(libs.mapping.io)
     compileOnly(libs.spongepowered.mixins)
     compileOnly(libs.bundles.kotlin.compiler)
 }

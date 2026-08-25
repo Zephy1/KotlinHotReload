@@ -20,6 +20,8 @@ repositories {
 
 dependencies {
     compileOnly(project(":common"))
+    include(libs.tiny.remapper)
+    include(libs.mapping.io)
     include(libs.bundles.kotlin.compiler)
     include(if (commonTarget <= 8) libs.bundles.maven.resolver.jvm8 else libs.bundles.maven.resolver)
 }
