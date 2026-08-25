@@ -25,6 +25,18 @@ data class CompileDiagnostic(
     }
 }
 
+internal fun warningDiagnostic(message: String) = CompileDiagnostic(
+    severity = CompileDiagnostic.Severity.WARNING,
+    message = message,
+    filePath = null, line = null, column = null,
+)
+
+internal fun errorDiagnostic(message: String) = CompileDiagnostic(
+    severity = CompileDiagnostic.Severity.ERROR,
+    message = message,
+    filePath = null, line = null, column = null,
+)
+
 data class CompileResult(
     val success: Boolean,
     val diagnostics: List<CompileDiagnostic>,

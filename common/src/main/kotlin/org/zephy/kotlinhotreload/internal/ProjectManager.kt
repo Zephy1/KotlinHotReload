@@ -7,7 +7,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 
 data class LoadedProject(
-    val name: String,
+    val projectName: String,
     val classLoader: ProjectClassLoader,
     val instance: Project?,
     val generation: Int,
@@ -24,12 +24,13 @@ class ProjectManager(
     private val cacheRoot: File,
     private val baseClassLoader: ClassLoader,
 ) {
+    private val versionTokenRegex = Regex("(?:^|/)(minecraft-)?(\\d+\\.\\d+\\.\\d+(?:[-.][A-Za-z0-9.]+)?)(?:/|\\.jar$)")
     private val compiler = ScriptCompiler()
     private val dependencyResolver = MavenDependencyResolver(localRepoDir = File(cacheRoot, "maven"))
     private val loadedProjects = ConcurrentHashMap<String, LoadedProject>()
 
     private val projectLocks = ConcurrentHashMap<String, Any>()
-    private fun lockFor(name: String): Any = projectLocks.computeIfAbsent(name) { Any() }
+    private fun lockFor(projectName: String): Any = projectLocks.computeIfAbsent(projectName) { Any() }
 
     private val engineOwnClasspath: List<File> by lazy {
         listOf(
@@ -37,7 +38,24 @@ class ProjectManager(
             classpathEntryFor(kotlin.jvm.internal.Intrinsics::class.java),
         )
     }
-    private val cachedRuntimeClasspath: List<File> by lazy { computeFullRuntimeClasspath() }
+    private val cachedRuntimeClasspath: List<File> by lazy {
+        computeFullRuntimeClasspath()
+    }
+
+    private val mcVersionInt: Int by lazy { ModLoaderHolder.instance.getMcVersionInt() }
+    private val mcVersionString: String by lazy { ModLoaderHolder.instance.getMcVersionString() }
+
+
+    private val neoForgeRuntimeIsOfficial: Boolean by lazy {
+        if (ModLoaderHolder.instance.loaderType != ModLoaderType.NEOFORGE) return@lazy false
+        try {
+            Class.forName("net.minecraft.world.entity.Entity", false, baseClassLoader)
+            true
+        } catch (e: Throwable) {
+            false
+        }
+    }
+
     private val globalPreprocessorVariables: MutableMap<String, Int> = mutableMapOf(
         "MC" to mcVersionInt,
         "FABRIC" to if (ModLoaderHolder.instance.loaderType == ModLoaderType.FABRIC) 1 else 0,
@@ -90,7 +108,7 @@ class ProjectManager(
             cacheKeyDir = File(cacheRoot, "deps/$name"),
         )
         val projectDependencyJars = ClasspathProjectIDRegistry.resolve(metadata.projectDependencies)
-        return engineOwnClasspath + cachedRuntimeClasspath + projectDependencyJars + resolvedDependencyJars
+        return engineOwnClasspath + compileTimeClasspath + projectDependencyJars + resolvedDependencyJars
     }
 
     fun listProjectNames(): List<String> =
@@ -100,30 +118,24 @@ class ProjectManager(
 
     fun listLoadedProjects(): List<LoadedProject> = loadedProjects.values.toList()
 
-    fun getLoaded(name: String): LoadedProject? = loadedProjects[name]
+    fun getLoaded(projectName: String): LoadedProject? = loadedProjects[projectName]
 
-    fun reload(name: String): ReloadOutcome {
-        if (!VALID_PROJECT_NAME.matches(name)) {
-            return ReloadOutcome.ProjectError(
-                "Invalid project name '$name' - only letters, digits, '-' and '_' are allowed."
-            )
+    fun reload(projectName: String): ReloadOutcome {
+        if (!VALID_PROJECT_NAME.matches(projectName)) {
+            return ReloadOutcome.ProjectError("Invalid project name '$projectName' - only letters, digits, '-' and '_' are allowed.")
         }
-        return synchronized(lockFor(name)) { reloadLocked(name) }
+        return synchronized(lockFor(projectName)) { reloadLocked(projectName) }
     }
 
-    private fun reloadLocked(name: String): ReloadOutcome {
-        val projectDir = File(projectsRoot, name)
+    private fun reloadLocked(projectName: String): ReloadOutcome {
+        val projectDir = File(projectsRoot, projectName)
         if (!projectDir.isDirectory) {
-            return ReloadOutcome.ProjectError(
-                "No project directory found at ${projectDir.absolutePath} - check the spelling, or run /script list to see available projects."
-            )
+            return ReloadOutcome.ProjectError("No project directory found at ${projectDir.absolutePath}.")
         }
 
         val sourceFiles = sourceFilesIn(projectDir)
         if (sourceFiles.isEmpty()) {
-            return ReloadOutcome.ProjectError(
-                "Project '$name' has no .kt source files in ${projectDir.absolutePath}."
-            )
+            return ReloadOutcome.ProjectError("Project '$projectName' has no .kt source files in ${projectDir.absolutePath}.")
         }
 
         val metadata = try {
@@ -135,13 +147,13 @@ class ProjectManager(
         val unknownProjectIDs = ClasspathProjectIDRegistry.unknownProjectIDs(metadata.projectDependencies)
 
         val fullClasspath = try {
-            fullClasspathFor(name, metadata)
+            fullClasspathFor(projectName, metadata)
         } catch (e: Exception) {
             return ReloadOutcome.ProjectError("Dependency resolution failed: ${e.describe()}.")
         }
 
-        val nextGeneration = (loadedProjects[name]?.generation ?: 0) + 1
-        val outputDir = File(cacheRoot, "build/$name/gen-$nextGeneration")
+        val nextGeneration = (loadedProjects[projectName]?.generation ?: 0) + 1
+        val outputDir = File(cacheRoot, "build/$projectName/gen-$nextGeneration")
         if (outputDir.exists()) outputDir.deleteRecursively()
 
         val mixinSourceFilter = filterOutOfVersionMixinSources(sourceFiles, metadata)
@@ -161,28 +173,23 @@ class ProjectManager(
 
         if (!compileResult.success) {
             val extra = if (unknownProjectIDs.isNotEmpty()) {
-                listOf(
-                    CompileDiagnostic(
-                        severity = CompileDiagnostic.Severity.WARNING,
-                        message = "Unknown classpath projectID(s) requested: ${unknownProjectIDs.joinToString()} - is the project that registers them installed?",
-                        filePath = null, line = null, column = null,
-                    )
-                )
+                listOf(warningDiagnostic("Unknown classpath projectID(s) requested: ${unknownProjectIDs.joinToString()}."))
             } else emptyList()
             return ReloadOutcome.CompileFailure(compileResult.errors + extra)
         }
 
         val newMixins = metadata.mixins.filterNot { it in MixinStaging.registeredMixins(name) }
+        val mappingsDiagnostics = namingResult.warning?.let { listOf(warningDiagnostic(it)) } ?: emptyList()
+        val versionGatedMixinDiagnostics = if (mixinSourceFilter.excludedNames.isNotEmpty()) {
+            listOf(warningDiagnostic("Skipped compiling mixin(s) not applicable to MC $mcVersionString: ${mixinSourceFilter.excludedNames.joinToString()}."))
+        } else emptyList()
+
+        val applicableMixinNames = metadata.mixins.applicable(mcVersionInt)
+        val newMixins = applicableMixinNames.filterNot { it in MixinStaging.registeredMixins(projectName) }
         val mixinDiagnostics = if (newMixins.isNotEmpty()) {
             val message = "New mixin(s) found: ${newMixins.joinToString()} - restart the game to register ${if (newMixins.size == 1) "it" else "them"}."
             System.err.println("${ScriptEngine.LOG_PREFIX} $message")
-            listOf(
-                CompileDiagnostic(
-                    severity = CompileDiagnostic.Severity.ERROR,
-                    message = message,
-                    filePath = null, line = null, column = null,
-                )
-            )
+            listOf(errorDiagnostic(message))
         } else emptyList()
 
         val newClassLoader = ProjectClassLoader(name, compileResult.outputDir!!, baseClassLoader).apply {
@@ -197,28 +204,28 @@ class ProjectManager(
         }
 
         try {
-            instance?.onLoad(name)
+            instance?.onLoad(projectName)
         } catch (e: Throwable) {
             newClassLoader.close()
             return ReloadOutcome.ProjectError("Entry point's onLoad() threw: ${e.describe()}.")
         }
 
-        val previous = loadedProjects[name]
+        val previous = loadedProjects[projectName]
         if (previous?.instance != null) {
             try {
                 previous.instance.onUnload()
             } catch (e: Throwable) {
-                System.err.println("${ScriptEngine.LOG_PREFIX} onUnload() threw for project '$name': ${e.describe()}.")
+                System.err.println("${ScriptEngine.LOG_PREFIX} onUnload() threw for project '$projectName': ${e.describe()}.")
             }
         }
         previous?.classLoader?.close()
 
-        val loaded = LoadedProject(name, newClassLoader, instance, nextGeneration)
-        loadedProjects[name] = loaded
+        val loaded = LoadedProject(projectName, newClassLoader, instance, nextGeneration)
+        loadedProjects[projectName] = loaded
 
-        cleanupOldGenerations(name, nextGeneration)
+        cleanupOldGenerations(projectName, nextGeneration)
 
-        return ReloadOutcome.Success(loaded, compileResult.warnings + mixinDiagnostics, newMixins)
+        return ReloadOutcome.Success(loaded, compileResult.warnings + mixinDiagnostics + mappingsDiagnostics + versionGatedMixinDiagnostics, newMixins)
     }
 
     fun stagePrelaunchMixins(): List<String> {
@@ -235,9 +242,7 @@ class ProjectManager(
                         try {
                             synchronized(lockFor(name)) { stagePrelaunchMixinsForLocked(name) }
                         } catch (e: Throwable) {
-                            System.err.println(
-                                "${ScriptEngine.LOG_PREFIX} Mixin prelaunch setup crashed for project '$name': ${e.describe()}."
-                            )
+                            System.err.println("${ScriptEngine.LOG_PREFIX} Mixin prelaunch setup crashed for project '$name': ${e.describe()}.")
                             emptyList()
                         }
                     })
@@ -248,8 +253,8 @@ class ProjectManager(
         }
     }
 
-    private fun stagePrelaunchMixinsForLocked(name: String): List<String> {
-        val projectDir = File(projectsRoot, name)
+    private fun stagePrelaunchMixinsForLocked(projectName: String): List<String> {
+        val projectDir = File(projectsRoot, projectName)
         if (!projectDir.isDirectory) return emptyList()
 
         val sourceFiles = sourceFilesIn(projectDir)
@@ -269,30 +274,27 @@ class ProjectManager(
             buildFile(projectName, "prelaunch.sig").delete()
             return emptyList()
         }
-        if (metadata.mixins.isEmpty()) return emptyList()
 
-        val outputDir = File(cacheRoot, "build/$name/prelaunch")
-        val signatureFile = File(cacheRoot, "build/$name/prelaunch.sig")
-        val signature = sourceSignature(metadataFile, sourceFiles)
+        val compileOutputDir = buildFile(projectName, "prelaunch")
+        val signatureFile = buildFile(projectName, "prelaunch.sig")
+        val signature = sourceSignature(metadataFile, sourceFiles, projectName)
 
         if (outputDir.isDirectory && signatureFile.isFile && signatureFile.readText() == signature) {
             return try {
                 MixinStaging.stage(name, outputDir, cacheRoot, metadata.mixins)
             } catch (e: IllegalArgumentException) {
-                System.err.println("${ScriptEngine.LOG_PREFIX} Mixin prelaunch setup failed for project '$name': ${e.describe()}.")
+                System.err.println("${ScriptEngine.LOG_PREFIX} Mixin prelaunch setup failed for project '$projectName': ${e.describe()}.")
                 emptyList()
             }
         }
 
-        System.err.println("${ScriptEngine.LOG_PREFIX} Compiling mixins for project '$name'...")
+        System.err.println("${ScriptEngine.LOG_PREFIX} Compiling mixins for project '$projectName'...")
 
         val depStart = System.currentTimeMillis()
         val fullClasspath = try {
-            fullClasspathFor(name, metadata)
+            fullClasspathFor(projectName, metadata)
         } catch (e: Exception) {
-            System.err.println(
-                "${ScriptEngine.LOG_PREFIX} Skipping mixin prelaunch setup for '$name' - dependency resolution failed: ${e.describe()}."
-            )
+            System.err.println("${ScriptEngine.LOG_PREFIX} Skipping mixin prelaunch setup for '$projectName' - dependency resolution failed: ${e.describe()}.")
             return emptyList()
         }
         val depMs = System.currentTimeMillis() - depStart
@@ -320,6 +322,7 @@ class ProjectManager(
         val compileMs = System.currentTimeMillis() - compileStart
         if (!compileResult.success) {
             System.err.println("${ScriptEngine.LOG_PREFIX} Skipping mixin prelaunch setup for '$name' - compile failed:")
+            System.err.println("${ScriptEngine.LOG_PREFIX} Skipping mixin prelaunch setup for '$projectName' - compile failed:")
             compileResult.errors.forEach { System.err.println("  $it") }
             return emptyList()
         }
@@ -333,12 +336,12 @@ class ProjectManager(
             )
             staged
         } catch (e: IllegalArgumentException) {
-            System.err.println("${ScriptEngine.LOG_PREFIX} Mixin prelaunch setup failed for project '$name': ${e.describe()}.")
+            System.err.println("${ScriptEngine.LOG_PREFIX} Mixin prelaunch setup failed for project '$projectName': ${e.describe()}.")
             emptyList()
         }
     }
 
-    private fun sourceSignature(metadataFile: File, sourceFiles: List<File>): String {
+    private fun sourceSignature(metadataFile: File, sourceFiles: List<File>, projectName: String): String {
         val digest = java.security.MessageDigest.getInstance("SHA-256")
         val preprocessorVariables = getPreprocessorVariables(projectName).toSortedMap()
         digest.update(metadataFile.readBytes())
@@ -347,31 +350,37 @@ class ProjectManager(
             digest.updateUtf8(value.toString())
         }
         sourceFiles.sortedBy { it.absolutePath }.forEach { file ->
-            digest.update(file.absolutePath.toByteArray())
-            digest.update(file.lastModified().toString().toByteArray())
-            digest.update(file.length().toString().toByteArray())
+            digest.updateUtf8(file.absolutePath)
+            digest.updateUtf8(file.lastModified().toString())
+            digest.updateUtf8(file.length().toString())
         }
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
-    fun unload(name: String): Boolean {
-        return synchronized(lockFor(name)) {
-            val loaded = loadedProjects.remove(name) ?: return@synchronized false
+    fun unload(projectName: String): Boolean {
+        return synchronized(lockFor(projectName)) {
+            val loaded = loadedProjects.remove(projectName) ?: return@synchronized false
             try {
                 loaded.instance?.onUnload()
             } catch (e: Throwable) {
-                System.err.println("${ScriptEngine.LOG_PREFIX} onUnload() threw for project '$name': ${e.describe()}.")
+                System.err.println("${ScriptEngine.LOG_PREFIX} onUnload() threw for project '$projectName': ${e.describe()}.")
             }
             loaded.classLoader.close()
             true
         }
     }
 
-    private fun cleanupOldGenerations(name: String, currentGeneration: Int) {
-        val projectBuildDir = File(cacheRoot, "build/$name")
+    private fun cleanupOldGenerations(projectName: String, currentGeneration: Int) {
+        val projectBuildDir = buildDir(projectName)
         val keepFrom = currentGeneration - 1
-        projectBuildDir.listFiles { f -> f.isDirectory && f.name.startsWith("gen-") }?.forEach { dir ->
-            val gen = dir.name.removePrefix("gen-").toIntOrNull()
+        projectBuildDir.listFiles { f ->
+            f.isDirectory && (f.name.startsWith("gen-") || f.name.startsWith("preprocessed-gen-") || f.name.startsWith("remapped-gen-"))
+        }?.forEach { dir ->
+            val gen = when {
+                dir.name.startsWith("remapped-gen-") -> dir.name.removePrefix("remapped-gen-").toIntOrNull()
+                dir.name.startsWith("preprocessed-gen-") -> dir.name.removePrefix("preprocessed-gen-").toIntOrNull()
+                else -> dir.name.removePrefix("gen-").toIntOrNull()
+            }
             if (gen != null && gen < keepFrom) {
                 dir.deleteRecursively()
             }
@@ -424,17 +433,74 @@ class ProjectManager(
             ?: throw IllegalStateException("Entry point class ${clazz.name} does not implement the Project interface.")
     }
 
-    fun classpathEntryFor(clazz: Class<*>): File {
-        val location = clazz.protectionDomain?.codeSource?.location
-            ?: error("Could not determine the classpath location for ${clazz.name} - it may have been loaded from somewhere other than a regular jar file.")
-        return File(location.toURI())
+    private fun computeFullRuntimeClasspath(): List<File> {
+        val seen = LinkedHashMap<String, File>()
+
+        fun addCandidate(path: String) {
+            if (path.isBlank()) return
+            val file = File(path).canonicalFile
+            if (!file.exists() || !file.isFile || !isRelevantRuntimeClasspathEntry(file)) return
+            seen[file.absolutePath.lowercase()] = file
+        }
+
+        System.getProperty("java.class.path")
+            ?.split(File.pathSeparator)
+            ?.forEach(::addCandidate)
+
+        var loader: ClassLoader? = baseClassLoader
+        while (loader != null) {
+            if (loader is java.net.URLClassLoader) {
+                loader.urLs.forEach { url ->
+                    try {
+                        addCandidate(File(url.toURI()).absolutePath)
+                    } catch (_: Throwable) {
+                        // Ignore errors
+                    }
+                }
+            }
+            loader = loader.parent
+        }
+
+        val entries = seen.values.toList()
+        val remappedVersions = entries
+            .map { normalizedPath(it) }
+            .filter { it.contains("/.fabric/remappedjars/") }
+            .mapNotNull { versionTokenFromPath(it) }
+            .toHashSet()
+
+        val filtered = entries.filter { entry ->
+            val path = normalizedPath(entry)
+            if (!path.contains("/meta/versions/")) return@filter true
+            val token = versionTokenFromPath(path) ?: return@filter true
+            token !in remappedVersions
+        }
+
+        return filtered.sortedBy { it.absolutePath.lowercase() }
     }
 
-    private fun computeFullRuntimeClasspath(): List<File> {
-        return System.getProperty("java.class.path")
-            .split(File.pathSeparator)
-            .filter { it.isNotBlank() }
-            .map { File(it) }
-            .filter { it.exists() }
+    private fun isRelevantRuntimeClasspathEntry(file: File): Boolean {
+        val path = normalizedPath(file)
+
+        if (path.contains("/mods/") || path.contains("/processedmods/")) {
+            return false
+        }
+
+        return path.contains("/meta/libraries/") ||
+            path.contains("/meta/versions/") ||
+            path.contains("/.fabric/remappedjars/") ||
+            path.contains("/fabric/loader/") ||
+            path.contains("/fabric-api-")
     }
+
+    private fun versionTokenFromPath(path: String): String? {
+        return versionTokenRegex.find(path)
+            ?.groupValues
+            ?.getOrNull(2)
+    }
+
+    private fun normalizedPath(file: File): String = file.absolutePath.replace('\\', '/').lowercase()
+
+    private fun buildDir(projectName: String): File = File(cacheRoot, "build/$projectName")
+
+    private fun buildFile(projectName: String, relativePath: String): File = File(buildDir(projectName), relativePath)
 }

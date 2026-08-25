@@ -44,15 +44,7 @@ class MavenDependencyResolver(
         val cacheFile = File(cacheKeyDir, "dependencies.cache")
         val hash = hashOf(coordinates)
 
-        if (cacheFile.exists()) {
-            val lines = cacheFile.readLines()
-            if (lines.isNotEmpty() && lines[0] == hash) {
-                val cachedJars = lines.drop(1).map(::File)
-                if (cachedJars.isNotEmpty() && cachedJars.all { it.exists() }) {
-                    return cachedJars
-                }
-            }
-        }
+        readCachedJars(cacheFile, hash)?.let { return it }
 
         val session = newSession()
         val dependencies = coordinates.map { coord ->
@@ -78,13 +70,10 @@ class MavenDependencyResolver(
         val jars = result.artifactResults.mapNotNull { it.artifact?.file }
 
         if (jars.size < coordinates.size) {
-            System.err.println(
-                "${ScriptEngine.LOG_PREFIX} Warning: requested ${coordinates.size} coordinate(s) but only resolved ${jars.size} jar(s) - some dependencies may have resolved without a file."
-            )
+            System.err.println("${ScriptEngine.LOG_PREFIX} Warning: requested ${coordinates.size} coordinate(s) but only resolved ${jars.size} jar(s) - some dependencies may have resolved without a file.")
         }
 
-        cacheKeyDir.mkdirs()
-        cacheFile.writeText((listOf(hash) + jars.map { it.absolutePath }).joinToString("\n"))
+        writeCache(cacheFile, hash, jars)
 
         return jars
     }
@@ -99,9 +88,24 @@ class MavenDependencyResolver(
 
     private fun hashOf(coordinates: List<String>): String {
         val digest = MessageDigest.getInstance("SHA-256")
-        coordinates.sorted().forEach { digest.update(it.toByteArray()) }
-        remoteRepositories.map { it.url }.sorted().forEach { digest.update(it.toByteArray()) }
+        coordinates.sorted().forEach(digest::updateUtf8)
+        remoteRepositories.map { it.url }.sorted().forEach(digest::updateUtf8)
         return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private fun readCachedJars(cacheFile: File, expectedHash: String): List<File>? {
+        if (!cacheFile.isFile) return null
+
+        val lines = cacheFile.readLines()
+        if (lines.isEmpty() || lines[0] != expectedHash) return null
+
+        val cachedJars = lines.drop(1).map(::File)
+        return if (cachedJars.isNotEmpty() && cachedJars.all { it.exists() }) cachedJars else null
+    }
+
+    private fun writeCache(cacheFile: File, hash: String, jars: List<File>) {
+        cacheFile.parentFile?.mkdirs()
+        cacheFile.writeText((listOf(hash) + jars.map { it.absolutePath }).joinToString("\n"))
     }
 
     private class LoggingTransferListener : AbstractTransferListener() {

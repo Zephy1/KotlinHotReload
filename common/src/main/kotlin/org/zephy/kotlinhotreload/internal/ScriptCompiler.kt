@@ -22,8 +22,8 @@ class ScriptCompiler {
                 loader.urLs.forEach { url ->
                     try {
                         entries += File(url.toURI())
-                    } catch (e: Throwable) {
-                        // Ignore URLs that can't be converted to files
+                    } catch (_: Throwable) {
+                        // Ignore errors
                     }
                 }
             }
@@ -41,16 +41,12 @@ class ScriptCompiler {
         entries.filter { it.exists() }
     }
 
-    private fun classpathEntryFor(clazz: Class<*>): File {
-        val location = clazz.protectionDomain?.codeSource?.location
-            ?: error(
-                "Could not determine the classpath location for ${clazz.name} - it may have been loaded from somewhere other than a regular jar file."
-            )
-        return File(location.toURI())
+    private val isWindows: Boolean by lazy {
+        System.getProperty("os.name").contains("windows", ignoreCase = true)
     }
 
     private val javaBinary: File by lazy {
-        val binName = if (System.getProperty("os.name").contains("windows", ignoreCase = true)) "java.exe" else "java"
+        val binName = if (isWindows) "java.exe" else "java"
         File(File(System.getProperty("java.home"), "bin"), binName)
     }
 
@@ -318,11 +314,9 @@ class ScriptCompiler {
             .toList()
 
         if (exitCode != 0 && parsed.none { it.severity == CompileDiagnostic.Severity.ERROR }) {
-            return parsed + CompileDiagnostic(
-                severity = CompileDiagnostic.Severity.ERROR,
+            return parsed + errorDiagnostic(
                 message = "Compiler process exited with code $exitCode and produced no diagnostic output" +
                     if (output.isBlank()) "" else " (raw output: ${output.trim()})",
-                filePath = null, line = null, column = null,
             )
         }
 

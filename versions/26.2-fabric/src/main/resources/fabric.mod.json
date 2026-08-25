@@ -17,10 +17,10 @@
     "environment": "*",
     "entrypoints": {
         "preLaunch": [
-            "org.zephy.kotlinhotreload.MixinPreLaunchEntrypoint"
+            "org.zephy.kotlinhotreload.PreLaunchEntrypoint"
         ],
         "main": [
-            "org.zephy.kotlinhotreload.FabricEntrypoint"
+            "org.zephy.kotlinhotreload.Entrypoint"
         ]
     },
     "mixins": [
