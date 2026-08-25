@@ -1,0 +1,12 @@
+{
+    "required": true,
+    "minVersion": "0.8",
+    "package": "org.zephy.kotlinhotreload.mixins",
+    "compatibilityLevel": "JAVA_${compatibilityLevel}",
+    "client": [
+        "CommandsMixin"
+    ],
+    "injectors": {
+        "defaultRequire": 1
+    }
+}
