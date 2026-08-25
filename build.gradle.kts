@@ -7,6 +7,9 @@ plugins {
 version = property("mod_version") as String
 group = property("mod_group") as String
 
+val commonTarget = platform.javaVersion.majorVersion.toInt()
+    .let { if (it in listOf(8, 17, 21, 25)) it else 8 }
+
 base {
     archivesName.set(property("mod_name") as String)
 }
@@ -18,29 +21,36 @@ repositories {
 dependencies {
     compileOnly(project(":common"))
     include(libs.bundles.kotlin.compiler)
-    include(libs.bundles.maven.resolver)
-    testImplementation(kotlin("test"))
+    include(if (commonTarget <= 8) libs.bundles.maven.resolver.jvm8 else libs.bundles.maven.resolver)
 }
 
 tasks.processResources {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
     inputs.property("version", project.version)
     filesMatching("fabric.mod.json") {
         expand(mutableMapOf("version" to project.version))
     }
+    val javaVersion = project.java.toolchain.languageVersion.get().asInt()
+    inputs.property("compatibilityLevel", javaVersion)
+    filesMatching("kotlinhotreload.mixins.json") {
+        expand(mutableMapOf("compatibilityLevel" to javaVersion))
+    }
+
     filesMatching("META-INF/neoforge.mods.toml") {
         expand(mutableMapOf("version" to project.version))
     }
 }
 
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
-    compilerOptions.jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_25)
+    compilerOptions.jvmTarget.set(platform.jvmTarget)
 }
 java {
-    sourceCompatibility = JavaVersion.VERSION_25
-    targetCompatibility = JavaVersion.VERSION_25
+    sourceCompatibility = platform.javaVersion
+    targetCompatibility = platform.javaVersion
 }
 kotlin {
-    jvmToolchain(25)
+    jvmToolchain(platform.javaVersion.majorVersion.toInt())
 }
 
 sourceSets {
@@ -52,7 +62,7 @@ sourceSets {
 }
 
 tasks.jar {
-    from(project(":common").sourceSets.main.get().output)
+    from(project(":common").configurations.named("jvm${commonTarget}Elements").map { it.artifacts.files })
 }
 
 afterEvaluate {

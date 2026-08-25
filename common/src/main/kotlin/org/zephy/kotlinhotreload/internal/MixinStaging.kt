@@ -26,7 +26,7 @@ data class MixinStatus(
 data class MixinConfigData(
     val required: Boolean = true,
     val minVersion: String = "0.8",
-    val compatibilityLevel: String = "JAVA_25",
+    val compatibilityLevel: String = "JAVA_${ScriptCompiler.JavaVersion.jvmVersion.replace("1.8", "8")}",
     val `package`: String,
     val mixins: List<String>,
     val injectors: Map<String, Int> = mapOf("defaultRequire" to 1),

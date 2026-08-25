@@ -54,6 +54,126 @@ class ScriptCompiler {
         File(File(System.getProperty("java.home"), "bin"), binName)
     }
 
+    object JavaVersion {
+        val jvmVersion: String by lazy {
+            System.getProperty("java.specification.version") ?: "25"
+        }
+        val isJava9OrLater: Boolean by lazy {
+            val major = jvmVersion.substringBefore('.').toIntOrNull() ?: 0
+            major >= 9
+        }
+    }
+
+    private fun processHandle(pid: Long): Any? = try {
+        val processHandleClass = Class.forName("java.lang.ProcessHandle")
+        val of = processHandleClass.getMethod("of", java.lang.Long.TYPE)
+        @Suppress("UNCHECKED_CAST")
+        (of.invoke(null, pid) as java.util.Optional<Any>).orElse(null)
+    } catch (_: Throwable) {
+        null
+    }
+
+    private fun getPidCompat(process: Process): Long? {
+        if (JavaVersion.isJava9OrLater) {
+            return try {
+                process.javaClass.getMethod("pid").invoke(process) as? Long
+            } catch (_: Throwable) {
+                null
+            }
+        }
+
+        return try {
+            val pidField = process.javaClass.getDeclaredField("pid")
+            pidField.isAccessible = true
+            when (val value = pidField.get(process)) {
+                is Long -> value
+                is Int -> value.toLong()
+                else -> null
+            }
+        } catch (_: NoSuchFieldException) {
+            try {
+                val handleField = process.javaClass.getDeclaredField("handle")
+                handleField.isAccessible = true
+                val handle = handleField.getLong(process)
+                val getProcessId0 = process.javaClass.getDeclaredMethod("getProcessId0", Long::class.javaPrimitiveType)
+                getProcessId0.isAccessible = true
+                (getProcessId0.invoke(null, handle) as? Int)?.toLong()
+            } catch (_: Throwable) {
+                null
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun isPidAliveCompat(pid: Long): Boolean {
+        if (!JavaVersion.isJava9OrLater) return isPidAlive(pid)
+        val handle = processHandle(pid) ?: return false
+        return try {
+            handle.javaClass.getMethod("isAlive").invoke(handle) as Boolean
+        } catch (_: Throwable) {
+            false
+        }
+    }
+    private fun isPidAlive(pid: Long): Boolean {
+        return try {
+            if (isWindows) {
+                val p = ProcessBuilder("tasklist", "/FI", "PID eq $pid").redirectErrorStream(true).start()
+                val output = p.inputStream.bufferedReader(StandardCharsets.UTF_8).readText()
+                p.waitFor(3, TimeUnit.SECONDS)
+                output.contains(pid.toString())
+            } else {
+                val p = ProcessBuilder("kill", "-0", pid.toString()).redirectErrorStream(true).start()
+                val finished = p.waitFor(3, TimeUnit.SECONDS)
+                finished && p.exitValue() == 0
+            }
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    private fun queryPidCommand(pid: Long): String? {
+        return try {
+            val p = if (isWindows) {
+                ProcessBuilder("wmic", "process", "where", "ProcessId=$pid", "get", "ExecutablePath")
+                    .redirectErrorStream(true).start()
+            } else {
+                ProcessBuilder("ps", "-o", "comm=", "-p", pid.toString())
+                    .redirectErrorStream(true).start()
+            }
+            val output = p.inputStream.bufferedReader(StandardCharsets.UTF_8).readText()
+            p.waitFor(3, TimeUnit.SECONDS)
+            output.trim().takeIf { it.isNotBlank() }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun killPidForciblyCompat(pid: Long) {
+        if (!JavaVersion.isJava9OrLater) {
+            killPidForcibly(pid)
+            return
+        }
+        val handle = processHandle(pid) ?: return
+        try {
+            handle.javaClass.getMethod("destroyForcibly").invoke(handle)
+        } catch (_: Throwable) {
+            // Ignore errors
+        }
+    }
+    private fun killPidForcibly(pid: Long) {
+        try {
+            val command = if (isWindows) {
+                listOf("taskkill", "/F", "/PID", pid.toString())
+            } else {
+                listOf("kill", "-9", pid.toString())
+            }
+            ProcessBuilder(command).redirectErrorStream(true).start().waitFor(5, TimeUnit.SECONDS)
+        } catch (_: Throwable) {
+            // Ignore errors
+        }
+    }
+
     fun compile(
         sourceFiles: List<File>,
         classpathEntries: List<File>,
@@ -77,28 +197,38 @@ class ScriptCompiler {
             "-d", outputDir.absolutePath,
             "-no-stdlib",
             "-no-reflect",
-            "-jvm-target", "25",
+            "-jvm-target", JavaVersion.jvmVersion,
             "-Xsuppress-version-warnings",
         )
         allArgs += sourceFiles.map { it.absolutePath }
 
-        val argfile = File.createTempFile("${ScriptEngine.MOD_ID}-compile-", ".args")
-        argfile.deleteOnExit()
-        argfile.writeText(
-            allArgs.joinToString("\n") { arg ->
-                if (arg.any { it.isWhitespace() }) "\"${arg.replace("\\", "\\\\").replace("\"", "\\\"")}\"" else arg
-            },
-            StandardCharsets.UTF_8,
-        )
+        val argfile: File? = if (JavaVersion.isJava9OrLater) {
+            File.createTempFile("${ScriptEngine.MOD_ID}-compile-", ".args").also {
+                it.deleteOnExit()
+                it.writeText(
+                    allArgs.joinToString("\n") { arg ->
+                        if (arg.any { it.isWhitespace() }) "\"${arg.replace("\\", "\\\\").replace("\"", "\\\"")}\"" else arg
+                    },
+                    StandardCharsets.UTF_8,
+                )
+            }
+        } else null
 
-        val command = listOf(javaBinary.absolutePath, "@${argfile.absolutePath}")
+        val command = if (argfile != null) {
+            listOf(javaBinary.absolutePath, "@${argfile.absolutePath}")
+        } else {
+            listOf(javaBinary.absolutePath) + allArgs
+        }
 
         val process = ProcessBuilder(command)
             .redirectErrorStream(true)
             .start()
 
         activeProcesses.add(process)
-        lockFile.writeText(process.pid().toString())
+        val pid = getPidCompat(process)
+        if (pid != null) {
+            lockFile.writeText(pid.toString())
+        }
 
         try {
             val outputBuilder = StringBuilder()
@@ -123,11 +253,7 @@ class ScriptCompiler {
             val output = outputBuilder.toString()
 
             val diagnostics = if (timedOut) {
-                parseDiagnostics(output, exitCode = 1) + CompileDiagnostic(
-                    severity = CompileDiagnostic.Severity.ERROR,
-                    message = "Compile timed out after $COMPILE_TIMEOUT_MINUTES minute(s) and was killed.",
-                    filePath = null, line = null, column = null,
-                )
+                parseDiagnostics(output, exitCode = 1) + errorDiagnostic("Compile timed out after $COMPILE_TIMEOUT_MINUTES minute(s) and was killed.")
             } else {
                 parseDiagnostics(output, exitCode)
             }
@@ -146,7 +272,7 @@ class ScriptCompiler {
         } finally {
             activeProcesses.remove(process)
             lockFile.delete()
-            argfile.delete()
+            argfile?.delete()
             if (process.isAlive) process.destroyForcibly()
         }
     }
@@ -154,14 +280,12 @@ class ScriptCompiler {
     private fun reapStaleProcess(lockFile: File) {
         if (!lockFile.isFile) return
         val pid = lockFile.readText().trim().toLongOrNull()
-        if (pid != null) {
-            val handle = ProcessHandle.of(pid).orElse(null)
-            if (handle != null && handle.isAlive && handle.info().command().orElse(null) == javaBinary.absolutePath) {
-                System.err.println(
-                    "${ScriptEngine.LOG_PREFIX} Found a leftover compiler process (pid $pid) that never " +
-                        "exited cleanly, likely from a previous crash - terminating it."
-                )
-                handle.destroyForcibly()
+        if (pid != null && isPidAliveCompat(pid)) {
+            val command = queryPidCommand(pid)
+            val looksLikeJava = command?.contains("java", ignoreCase = true) == true
+            if (looksLikeJava) {
+                System.err.println("${ScriptEngine.LOG_PREFIX} Found a leftover compiler process (pid $pid) that never exited cleanly - terminating it.")
+                killPidForciblyCompat(pid)
             }
         }
         lockFile.delete()
@@ -185,12 +309,10 @@ class ScriptCompiler {
                         line = g[2].toIntOrNull(),
                         column = g[3].toIntOrNull(),
                     )
+                } else if (exitCode != 0) {
+                    errorDiagnostic(line)
                 } else {
-                    CompileDiagnostic(
-                        severity = if (exitCode != 0) CompileDiagnostic.Severity.ERROR else CompileDiagnostic.Severity.WARNING,
-                        message = line,
-                        filePath = null, line = null, column = null,
-                    )
+                    warningDiagnostic(line)
                 }
             }
             .toList()

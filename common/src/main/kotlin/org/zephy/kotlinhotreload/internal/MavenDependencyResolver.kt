@@ -10,7 +10,6 @@ import org.eclipse.aether.repository.LocalRepository
 import org.eclipse.aether.repository.RemoteRepository
 import org.eclipse.aether.resolution.DependencyRequest
 import org.eclipse.aether.resolution.DependencyResolutionException
-import org.eclipse.aether.supplier.RepositorySystemSupplier
 import org.eclipse.aether.transfer.AbstractTransferListener
 import org.eclipse.aether.transfer.TransferEvent
 import java.io.File
@@ -33,7 +32,7 @@ class MavenDependencyResolver(
         ).build()
     ),
 ) {
-    private val repositorySystem: RepositorySystem = RepositorySystemSupplier().get()
+    private val repositorySystem: RepositorySystem = newRepositorySystem()
 
     init {
         localRepoDir.mkdirs()
@@ -115,5 +114,115 @@ class MavenDependencyResolver(
             val reason = event.exception?.describe() ?: "unknown reason"
             System.err.println("${ScriptEngine.LOG_PREFIX} Corrupted download: ${event.resource.repositoryUrl}${event.resource.resourceName} - $reason")
         }
+    }
+}
+
+private fun newRepositorySystem(): RepositorySystem {
+    val supplierAttempt = trySupplierApi()
+    supplierAttempt.system?.let { return it }
+
+    val locatorAttempt = tryServiceLocatorApi()
+    locatorAttempt.system?.let { return it }
+
+    error(
+        "Could not construct a Maven RepositorySystem.\n" +
+            "  RepositorySystemSupplier attempt: ${supplierAttempt.describeFailure()}\n" +
+            "  DefaultServiceLocator attempt: ${locatorAttempt.describeFailure()}"
+    )
+}
+
+private class ApiAttempt(val system: RepositorySystem?, val failure: Throwable?) {
+    fun describeFailure(): String =
+        if (system != null) "succeeded"
+        else failure?.let { "${it.javaClass.name}: ${it.message}" } ?: "failed with no exception captured"
+}
+
+private fun trySupplierApi(): ApiAttempt {
+    return try {
+        val supplierClass = Class.forName("org.eclipse.aether.supplier.RepositorySystemSupplier")
+        val supplier = supplierClass.getDeclaredConstructor().newInstance()
+        val system = supplierClass.getMethod("get").invoke(supplier) as? RepositorySystem
+        ApiAttempt(system, if (system == null) IllegalStateException("get() returned null or a non-RepositorySystem value") else null)
+    } catch (e: ReflectiveOperationException) {
+        ApiAttempt(null, e)
+    } catch (e: LinkageError) {
+        ApiAttempt(null, e)
+    }
+}
+
+private fun tryServiceLocatorApi(): ApiAttempt {
+    return try {
+        val locator = MavenRepositorySystemUtils::class.java
+            .getMethod("newServiceLocator")
+            .invoke(null)
+        val locatorClass = locator.javaClass
+        val addService = locatorClass.getMethod("addService", Class::class.java, Class::class.java)
+
+        val repositorySystemInterface = Class.forName("org.eclipse.aether.RepositorySystem")
+        val defaultRepositorySystemImpl = Class.forName("org.eclipse.aether.internal.impl.DefaultRepositorySystem")
+        addService.invoke(locator, repositorySystemInterface, defaultRepositorySystemImpl)
+
+        val repoConnectorFactory = Class.forName("org.eclipse.aether.spi.connector.RepositoryConnectorFactory")
+        val transporterFactory = Class.forName("org.eclipse.aether.spi.connector.transport.TransporterFactory")
+        val basicConnectorFactory = Class.forName("org.eclipse.aether.connector.basic.BasicRepositoryConnectorFactory")
+        val fileTransporterFactory = Class.forName("org.eclipse.aether.transport.file.FileTransporterFactory")
+        val httpTransporterFactory = Class.forName("org.eclipse.aether.transport.http.HttpTransporterFactory")
+
+        addService.invoke(locator, repoConnectorFactory, basicConnectorFactory)
+        addService.invoke(locator, transporterFactory, fileTransporterFactory)
+        addService.invoke(locator, transporterFactory, httpTransporterFactory)
+
+        val getService = locatorClass.getMethod("getService", Class::class.java)
+
+        val collaboratorInterfaceNames = listOf(
+            "org.eclipse.aether.impl.VersionResolver",
+            "org.eclipse.aether.impl.VersionRangeResolver",
+            "org.eclipse.aether.impl.ArtifactResolver",
+            "org.eclipse.aether.impl.MetadataResolver",
+            "org.eclipse.aether.impl.ArtifactDescriptorReader",
+            "org.eclipse.aether.impl.DependencyCollector",
+            "org.eclipse.aether.impl.Installer",
+            "org.eclipse.aether.impl.Deployer",
+            "org.eclipse.aether.impl.LocalRepositoryProvider",
+            "org.eclipse.aether.impl.SyncContextFactory",
+            "org.eclipse.aether.impl.RemoteRepositoryManager",
+            "org.eclipse.aether.impl.RepositoryConnectorProvider",
+            "org.eclipse.aether.impl.RepositoryEventDispatcher",
+            "org.eclipse.aether.impl.RepositoryLayoutProvider",
+            "org.eclipse.aether.impl.OfflineController",
+            "org.eclipse.aether.impl.UpdateCheckManager",
+            "org.eclipse.aether.impl.UpdatePolicyAnalyzer",
+            "org.eclipse.aether.impl.RepositorySystemLifecycle",
+            "org.eclipse.aether.impl.RemoteRepositoryFilterManager",
+        )
+        val collaboratorResults = collaboratorInterfaceNames.map { name ->
+            val status = try {
+                val iface = Class.forName(name)
+                val result = getService.invoke(locator, iface)
+                if (result != null) "OK (${result.javaClass.name})" else "NULL - failed to construct, no exception surfaced"
+            } catch (_: ClassNotFoundException) {
+                "not present in this resolver version (skipped)"
+            } catch (e: Throwable) {
+                "threw ${e.javaClass.name}: ${e.message}"
+            }
+            "$name -> $status"
+        }
+
+        val system = getService.invoke(locator, RepositorySystem::class.java) as? RepositorySystem
+        ApiAttempt(
+            system,
+            if (system == null) {
+                IllegalStateException("getService(RepositorySystem) returned null after registering DefaultRepositorySystem:\n${collaboratorResults.joinToString("\n    ")}")
+            } else null,
+        )
+    } catch (e: ClassNotFoundException) {
+        ApiAttempt(
+            null,
+            IllegalStateException("${e.message} is not on the runtime classpath.", e),
+        )
+    } catch (e: ReflectiveOperationException) {
+        ApiAttempt(null, e)
+    } catch (e: LinkageError) {
+        ApiAttempt(null, e)
     }
 }
