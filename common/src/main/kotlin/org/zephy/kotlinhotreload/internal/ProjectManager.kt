@@ -48,6 +48,10 @@ class ProjectManager(
     private val projectLocks = ConcurrentHashMap<String, Any>()
     private fun lockFor(projectName: String): Any = projectLocks.computeIfAbsent(projectName) { Any() }
 
+    private val ideaProject = IdeaProject(this)
+
+    fun regenerateIdeProjects() = ideaProject.regenerate()
+
     private val engineOwnClasspath: List<File> by lazy {
         listOf(
             classpathEntryFor(Project::class.java),
@@ -73,6 +77,35 @@ class ProjectManager(
             false
         }
     }
+
+    fun sharedIdeClasspath(): List<File> = engineOwnClasspath + compileTimeClasspath
+
+    fun extraIdeClasspathFor(projectName: String): List<File>? {
+        val projectDir = File(projectsRoot, projectName)
+        val metadataFile = File(projectDir, "metadata.json")
+        if (!metadataFile.isFile) return emptyList()
+
+        val metadata = try {
+            ProjectMetadata.parse(metadataFile)
+        } catch (e: Exception) {
+            return null
+        }
+
+        return try {
+            val resolvedDependencyJars = dependencyResolver.resolve(
+                metadata.dependencies,
+                cacheKeyDir = File(cacheRoot, "deps/$projectName"),
+            )
+            val projectDependencyJars = ClasspathProjectIDRegistry.resolve(metadata.projectDependencies)
+            projectDependencyJars + resolvedDependencyJars
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    fun sourceDirFor(projectName: String): File = File(projectsRoot, projectName)
+
+    fun ideProjectDirFor(projectName: String): File = sourceDirFor(projectName)
 
     private val globalPreprocessorVariables: MutableMap<String, Int> = mutableMapOf(
         "MC" to mcVersionInt,
@@ -249,6 +282,8 @@ class ProjectManager(
         } catch (e: Exception) {
             return ReloadOutcome.ProjectError(e.message ?: "Failed to parse metadata.json.")
         }
+
+        ideaProject.regenerateOne(projectName)
 
         val unknownProjectIDs = ClasspathProjectIDRegistry.unknownProjectIDs(metadata.projectDependencies)
 
