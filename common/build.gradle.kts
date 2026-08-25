@@ -10,10 +10,12 @@ group = property("mod_group") as String
 
 repositories {
     mavenCentral()
+    maven("https://repo.spongepowered.org/repository/maven-public/")
 }
 
 dependencies {
     compileOnly(libs.asm)
+    compileOnly(libs.spongepowered.mixins)
     compileOnly(libs.bundles.kotlin.compiler)
 }
 

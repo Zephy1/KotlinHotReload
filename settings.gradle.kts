@@ -7,6 +7,7 @@ pluginManagement {
         maven("https://repo.essential.gg/repository/maven-public")
         maven("https://maven.fabricmc.net/") { name = "Fabric" }
         maven("https://maven.neoforged.net/releases") { name = "NeoForged" }
+        maven("https://repo.spongepowered.org/repository/maven-public/")
     }
 }
 

@@ -8,8 +8,6 @@ import org.objectweb.asm.Opcodes
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
-private const val MIXIN_ANNOTATION_DESC = "Lorg/spongepowered/asm/mixin/Mixin;"
-
 enum class MixinLoadState {
     LOADED,
     PENDING_RESTART,
@@ -30,6 +28,7 @@ data class MixinConfigData(
     val `package`: String,
     val mixins: List<String>,
     val injectors: Map<String, Int> = mapOf("defaultRequire" to 1),
+    val remap: Boolean = false,
 )
 
 object MixinStaging {
@@ -86,24 +85,32 @@ object MixinStaging {
 
         val compiledClasses = scanCompiledClasses(compiledOutputDir)
         val byQualifiedName = compiledClasses.associateBy { it.qualifiedName }
-        val bySourceFileKey = compiledClasses
-            .filter { it.sourceFileBaseName != null }
-            .associateBy { it.sourceKey() }
+        val bySourceFileKey = compiledClasses.mapNotNull { it.sourceKeyOrNull()?.let { key -> key to it } }.toMap()
+        val bySimpleClassName = compiledClasses.groupBy { it.qualifiedName.substringAfterLast('.') }
+        val bySimpleSourceFileName = compiledClasses.mapNotNull { info -> info.sourceFileBaseName?.let { it to info } }.groupBy({ it.first }, { it.second })
+
+        fun simpleNameCandidates(name: String): List<CompiledClassInfo> {
+            val simple = name.substringAfterLast('.')
+            return (bySimpleClassName[simple].orEmpty() + bySimpleSourceFileName[simple].orEmpty())
+                .distinctBy { it.qualifiedName }
+        }
 
         val failures = linkedMapOf<String, String>()
         val aliases = linkedMapOf<String, String>()
         val refs = mixinClassNames.mapNotNull { name ->
-            val info = byQualifiedName[name] ?: bySourceFileKey[name]
+            val candidates = simpleNameCandidates(name)
+            val info = byQualifiedName[name] ?: bySourceFileKey[name] ?: candidates.singleOrNull()
             if (info == null) {
-                failures[name] = "No compiled class was found for $name - check that the name matches " +
-                    "either the mixin class's qualified name or its source .kt file name, and " +
-                    "that the package declaration is correct."
+                failures[name] = if (candidates.size > 1) {
+                    "Ambiguous mixin name \"$name\" - multiple classes match name (${candidates.joinToString { it.qualifiedName }}) - use the full class name in metadata.json to disambiguate."
+                } else {
+                    "No compiled class was found for $name."
+                }
                 return@mapNotNull null
             }
 
             if (!info.isMixinAnnotated) {
-                failures[name] = "The class $name has no @Mixin annotation - annotate it with " +
-                    "@org.spongepowered.asm.mixin.Mixin, or remove it from metadata.json's \"mixins\" list."
+                failures[name] = "The class $name has no @Mixin annotation."
                 return@mapNotNull null
             }
 
@@ -117,9 +124,7 @@ object MixinStaging {
         stagingErrorsByProject[projectName] = failures
 
         if (failures.isNotEmpty()) {
-            throw IllegalArgumentException(
-                "metadata.json lists ${failures.size} invalid mixin(s) for project \"$projectName\": ${failures.entries.joinToString("; ") { (name, reason) -> "\"$name\" - $reason" }}"
-            )
+            throw IllegalArgumentException("metadata.json lists ${failures.size} invalid mixin(s) for project \"$projectName\": ${failures.entries.joinToString("; ") { (name, reason) -> "\"$name\" - $reason" }}")
         }
 
         stageDir.deleteRecursively()
@@ -141,7 +146,7 @@ object MixinStaging {
         return refs
             .groupBy { it.packageName }
             .map { (pkg, group) ->
-                val configName = "mixins.$projectName.${pkg.ifEmpty { "default" }}.json"
+                val configName = mixinConfigName(projectName, pkg)
                 val config = MixinConfigData(`package` = pkg, mixins = group.map { it.simpleName })
                 File(classesDir, configName).writeText(gson.toJson(config))
                 configName
@@ -161,8 +166,8 @@ object MixinStaging {
     ) {
         val packageName: String get() = qualifiedName.substringBeforeLast('.', "")
 
-        fun sourceKey(): String {
-            val base = sourceFileBaseName!!
+        fun sourceKeyOrNull(): String? {
+            val base = sourceFileBaseName ?: return null
             return if (packageName.isEmpty()) base else "$packageName.$base"
         }
     }
@@ -210,4 +215,7 @@ object MixinStaging {
             isMixinAnnotated = isMixin,
         )
     }
+
+    private fun mixinConfigName(projectName: String, pkg: String): String =
+        "mixins.$projectName.${pkg.ifEmpty { "default" }}.json"
 }

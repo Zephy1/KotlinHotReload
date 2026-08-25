@@ -1,19 +1,21 @@
 package org.zephy.kotlinhotreload.internal
 
 import com.google.gson.Gson
-import com.google.gson.GsonBuilder
 import com.google.gson.JsonSyntaxException
+import com.google.gson.annotations.JsonAdapter
 import com.google.gson.annotations.SerializedName
 import java.io.File
 
 data class ProjectMetadata(
-    @SerializedName("entryPoint") val entryPointClass: String? = null,
+    @SerializedName("entryPoint")
+    val entryPointClass: String? = null,
     val projectDependencies: List<String> = emptyList(),
     val dependencies: List<String> = emptyList(),
-    val mixins: List<String> = emptyList(),
+    @JsonAdapter(MixinsDeserializer::class)
+    val mixins: List<MixinEntry> = emptyList(),
 ) {
     companion object {
-        private val gson: Gson = GsonBuilder().create()
+        private val gson: Gson = Gson()
 
         private val COORDINATE_REGEX = Regex("^[^:\\s]+:[^:\\s]+:[^:\\s]+$")
         private val QUALIFIED_CLASS_NAME_REGEX = Regex("^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*$")
@@ -29,13 +31,9 @@ data class ProjectMetadata(
             val metadata = try {
                 gson.fromJson(text, ProjectMetadata::class.java) ?: default()
             } catch (e: JsonSyntaxException) {
-                throw IllegalArgumentException(
-                    "Malformed metadata.json (${file.absolutePath}): ${e.describe()}.", e
-                )
+                throw IllegalArgumentException("Malformed metadata.json (${file.absolutePath}): ${e.describe()}.", e)
             } catch (e: com.google.gson.JsonIOException) {
-                throw IllegalArgumentException(
-                    "Could not read metadata.json (${file.absolutePath}): ${e.describe()}.", e
-                )
+                throw IllegalArgumentException("Could not read metadata.json (${file.absolutePath}): ${e.describe()}.", e)
             }
 
             metadata.validate(file)
@@ -46,9 +44,7 @@ data class ProjectMetadata(
     private fun validate(file: File) {
         val badCoordinates = dependencies.filterNot { COORDINATE_REGEX.matches(it) }
         if (badCoordinates.isNotEmpty()) {
-            throw IllegalArgumentException(
-                "metadata.json (${file.absolutePath}) has malformed dependency coordinate(s) (expected \"group:artifact:version\"): ${badCoordinates.joinToString()}."
-            )
+            throw IllegalArgumentException("metadata.json (${file.absolutePath}) has malformed dependency coordinate(s) (expected \"group:artifact:version\"): ${badCoordinates.joinToString()}.")
         }
 
         if (projectDependencies.any { it.isBlank() }) {
@@ -61,18 +57,12 @@ data class ProjectMetadata(
         }
 
         if (entryPointClass != null && entryPointClass.isBlank()) {
-            throw IllegalArgumentException(
-                "metadata.json (${file.absolutePath}) has a blank \"entryPoint\" value."
-            )
+            throw IllegalArgumentException("metadata.json (${file.absolutePath}) has a blank \"entryPoint\" value.")
         }
 
-        val badMixinNames = mixins.filterNot { QUALIFIED_CLASS_NAME_REGEX.matches(it) }
+        val badMixinNames = mixins.map { it.name }.filterNot { QUALIFIED_CLASS_NAME_REGEX.matches(it) }
         if (badMixinNames.isNotEmpty()) {
-            throw IllegalArgumentException(
-                "metadata.json (${file.absolutePath}) has malformed \"mixins\" entry/entries " +
-                    "(expected fully-qualified class names, e.g. \"mymixins.PlayerMixin\"): " +
-                    badMixinNames.joinToString()
-            )
+            throw IllegalArgumentException("metadata.json (${file.absolutePath}) has malformed \"mixins\" entry/entries: ${badMixinNames.joinToString()}")
         }
     }
 }

@@ -57,6 +57,33 @@ class ProjectManager(
     private fun sourceFilesIn(projectDir: File): List<File> =
         projectDir.walkTopDown().filter { it.isFile && it.extension == "kt" }.toList()
 
+    private val PACKAGE_DECLARATION = Regex("""^\s*package\s+([A-Za-z_][A-Za-z0-9_.]*)""", RegexOption.MULTILINE)
+
+    private fun sourceKeyFor(file: File): String {
+        val pkg = PACKAGE_DECLARATION.find(file.readText())?.groupValues?.get(1) ?: ""
+        val base = file.nameWithoutExtension
+        return if (pkg.isEmpty()) base else "$pkg.$base"
+    }
+
+    private class MixinSourceFilterResult(val sourceFiles: List<File>, val excludedNames: List<String>)
+
+    private fun filterOutOfVersionMixinSources(sourceFiles: List<File>, metadata: ProjectMetadata): MixinSourceFilterResult {
+        val declaredNames = metadata.mixins.map { it.name }
+        if (declaredNames.isEmpty()) return MixinSourceFilterResult(sourceFiles, emptyList())
+
+        val excludedNames = declaredNames.filterNot(metadata.mixins.applicable(mcVersionInt).toSet()::contains)
+        if (excludedNames.isEmpty()) return MixinSourceFilterResult(sourceFiles, emptyList())
+
+        val excludedFullKeys = excludedNames.toSet()
+        val excludedSimpleNames = excludedNames.map { it.substringAfterLast('.') }.toSet()
+
+        val filtered = sourceFiles.filterNot { file ->
+            file.extension == "kt" &&
+                    (file.nameWithoutExtension in excludedSimpleNames || sourceKeyFor(file) in excludedFullKeys)
+        }
+        return MixinSourceFilterResult(filtered, excludedNames)
+    }
+
     private fun fullClasspathFor(name: String, metadata: ProjectMetadata): List<File> {
         val resolvedDependencyJars = dependencyResolver.resolve(
             metadata.dependencies,
@@ -117,6 +144,7 @@ class ProjectManager(
         val outputDir = File(cacheRoot, "build/$name/gen-$nextGeneration")
         if (outputDir.exists()) outputDir.deleteRecursively()
 
+        val mixinSourceFilter = filterOutOfVersionMixinSources(sourceFiles, metadata)
 
         val preprocessedDir = File(cacheRoot, "build/$projectName/preprocessed-gen-$nextGeneration")
         val preprocessedSources = try {
@@ -231,9 +259,14 @@ class ProjectManager(
         val metadata = try {
             ProjectMetadata.parse(metadataFile)
         } catch (e: Exception) {
-            System.err.println(
-                "${ScriptEngine.LOG_PREFIX} Skipping mixin prelaunch setup for '$name' - failed to parse metadata.json: ${e.describe()}."
-            )
+            System.err.println("${ScriptEngine.LOG_PREFIX} Skipping mixin prelaunch setup for '$projectName' - failed to parse metadata.json: ${e.describe()}.")
+            return emptyList()
+        }
+        val applicableMixinNames = metadata.mixins.applicable(mcVersionInt)
+        if (applicableMixinNames.isEmpty()) {
+            buildFile(projectName, "mixins").deleteRecursively()
+            buildFile(projectName, "prelaunch-remapped").deleteRecursively()
+            buildFile(projectName, "prelaunch.sig").delete()
             return emptyList()
         }
         if (metadata.mixins.isEmpty()) return emptyList()
@@ -307,7 +340,12 @@ class ProjectManager(
 
     private fun sourceSignature(metadataFile: File, sourceFiles: List<File>): String {
         val digest = java.security.MessageDigest.getInstance("SHA-256")
+        val preprocessorVariables = getPreprocessorVariables(projectName).toSortedMap()
         digest.update(metadataFile.readBytes())
+        preprocessorVariables.forEach { (name, value) ->
+            digest.updateUtf8(name)
+            digest.updateUtf8(value.toString())
+        }
         sourceFiles.sortedBy { it.absolutePath }.forEach { file ->
             digest.update(file.absolutePath.toByteArray())
             digest.update(file.lastModified().toString().toByteArray())

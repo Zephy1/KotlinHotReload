@@ -1,6 +1,7 @@
 [versions]
 kotlin = "2.4.10"
 asm = "9.10.1"
+spongepowered-mixins = "0.8.7"
 maven-resolver = "2.0.21"
 maven-resolver-transport-http = "1.9.27"
 maven-resolver-provider = "4.0.0-rc-6"
