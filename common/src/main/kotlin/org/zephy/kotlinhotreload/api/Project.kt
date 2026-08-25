@@ -1,5 +1,7 @@
 package org.zephy.kotlinhotreload.api
 
+import org.zephy.kotlinhotreload.internal.ScriptEngine
+
 abstract class Project {
     lateinit var projectName: String
         private set
@@ -11,4 +13,8 @@ abstract class Project {
 
     open fun onLoad() { }
     open fun onUnload() { }
+
+    fun registerPreprocessorVariable(name: String, value: Int) {
+        ScriptEngine.projectManager.registerPreprocessorVariable(projectName, name, value)
+    }
 }

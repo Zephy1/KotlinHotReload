@@ -38,6 +38,19 @@ class ProjectManager(
         )
     }
     private val cachedRuntimeClasspath: List<File> by lazy { computeFullRuntimeClasspath() }
+    private val globalPreprocessorVariables: MutableMap<String, Int> = mutableMapOf(
+        "MC" to mcVersionInt,
+        "FABRIC" to if (ModLoaderHolder.instance.loaderType == ModLoaderType.FABRIC) 1 else 0,
+        "NEOFORGE" to if (ModLoaderHolder.instance.loaderType == ModLoaderType.NEOFORGE) 1 else 0,
+    )
+    private val projectPreprocessorVariables: MutableMap<String, MutableMap<String, Int>> = mutableMapOf()
+    fun registerPreprocessorVariable(projectName: String, variableName: String, value: Int) {
+        projectPreprocessorVariables.getOrPut(projectName) { mutableMapOf() }[variableName] = value
+    }
+    fun getPreprocessorVariables(projectName: String): Map<String, Int> {
+        val scoped = projectPreprocessorVariables[projectName] ?: emptyMap()
+        return globalPreprocessorVariables + scoped
+    }
 
     private val VALID_PROJECT_NAME = Regex("^[A-Za-z0-9_-]+$")
 
@@ -104,8 +117,16 @@ class ProjectManager(
         val outputDir = File(cacheRoot, "build/$name/gen-$nextGeneration")
         if (outputDir.exists()) outputDir.deleteRecursively()
 
+
+        val preprocessedDir = File(cacheRoot, "build/$projectName/preprocessed-gen-$nextGeneration")
+        val preprocessedSources = try {
+            ScriptPreprocessor.stage(mixinSourceFilter.sourceFiles, projectDir, preprocessedDir, getPreprocessorVariables(projectName))
+        } catch (e: ScriptPreprocessor.PreprocessException) {
+            return ReloadOutcome.CompileFailure(listOf(errorDiagnostic(e.message ?: "Preprocessing failed.")))
+        }
+
         val compileResult: CompileResult = compiler.compile(
-            sourceFiles = sourceFiles,
+            sourceFiles = preprocessedSources,
             classpathEntries = fullClasspath,
             outputDir = outputDir,
         )
@@ -243,13 +264,25 @@ class ProjectManager(
         }
         val depMs = System.currentTimeMillis() - depStart
 
-        if (outputDir.exists()) outputDir.deleteRecursively()
+        if (compileOutputDir.exists()) compileOutputDir.deleteRecursively()
+
+        val preprocessedDir = File(cacheRoot, "build/$projectName/prelaunch-preprocessed")
+        val mixinSourceFilter = filterOutOfVersionMixinSources(sourceFiles, metadata)
+        if (mixinSourceFilter.excludedNames.isNotEmpty()) {
+            System.err.println("${ScriptEngine.LOG_PREFIX} Skipping compilation of mixin(s) not applicable to MC $mcVersionString for project '$projectName': ${mixinSourceFilter.excludedNames.joinToString()}.")
+        }
+        val preprocessedSources = try {
+            ScriptPreprocessor.stage(mixinSourceFilter.sourceFiles, projectDir, preprocessedDir, getPreprocessorVariables(projectName))
+        } catch (e: ScriptPreprocessor.PreprocessException) {
+            System.err.println("${ScriptEngine.LOG_PREFIX} Skipping mixin prelaunch setup for '$projectName' - preprocessing failed: ${e.message}")
+            return emptyList()
+        }
 
         val compileStart = System.currentTimeMillis()
         val compileResult = compiler.compile(
-            sourceFiles = sourceFiles,
+            sourceFiles = preprocessedSources,
             classpathEntries = fullClasspath,
-            outputDir = outputDir,
+            outputDir = compileOutputDir,
         )
         val compileMs = System.currentTimeMillis() - compileStart
         if (!compileResult.success) {
