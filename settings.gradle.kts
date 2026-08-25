@@ -19,13 +19,11 @@ rootProject.buildFileName = "root.gradle.kts"
 
 val versionList = listOf(
     "26.2-fabric",
-    "1.21.11-fabric",
-    "1.21.10-fabric",
     "1.19.4-fabric",
-    "1.18.2-fabric",
-    "1.15.2-fabric",
+    "1.14.4-fabric",
 
 //    "26.2-neoforge",
+//    "1.21.11-neoforge",
 )
 versionList.forEach { version ->
     file("versions/$version").mkdirs()
